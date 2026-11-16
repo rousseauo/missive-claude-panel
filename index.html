@@ -4,258 +4,39 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude</title>
-<script src="https://integrations.missiveapp.com/missive.js"></script>
-<style>
-  :root {
-    --bg: #ffffff; --fg: #1f2328; --muted: #6b7280; --line: #e5e7eb; --hover: #f3f4f6;
-    --accent: #d97757; --ok: #1a7f37; --err: #cf222e; --run: #bf8700;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #1e1f22; --fg: #e6e6e6; --muted: #8b9096; --line: #34363b; --hover: #2a2c30;
-      --ok: #3fb950; --err: #f85149; --run: #d29922; }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; padding: 10px; background: var(--bg); color: var(--fg);
-    font: 13px/1.35 -apple-system, "Segoe UI", system-ui, sans-serif; }
-  .ctx { font-size: 11px; color: var(--muted); margin: 0 0 4px; white-space: nowrap;
-    overflow: hidden; text-overflow: ellipsis; }
-  textarea { display: block; width: 100%; min-height: 58px; resize: vertical; padding: 7px 8px;
-    border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); font: inherit; }
-  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
-  textarea:disabled { opacity: .5; }
-  .note { display: none; margin-bottom: 8px; font-size: 12px; color: var(--err); }
-  .box { display: none; margin-bottom: 10px; font-size: 12px; }
-  .box code { display: block; margin: 4px 0; word-break: break-all; font-size: 11px; color: var(--muted); }
-  .box input { width: 100%; margin: 4px 0; padding: 6px; border: 1px solid var(--line); border-radius: 6px;
-    background: var(--bg); color: var(--fg); font: inherit; }
-  button.small { background: var(--accent); color: #fff; border: 0; border-radius: 5px; padding: 4px 10px;
-    font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
-  .list { margin-top: 12px; }
-  .job { position: relative; display: grid; grid-template-columns: 10px 1fr; column-gap: 7px;
-    padding: 6px 22px 6px 4px; border-radius: 5px; cursor: pointer; }
-  .job:hover { background: var(--hover); }
-  .job.here { box-shadow: inset 2px 0 0 var(--accent); }
-  .dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; background: var(--muted); }
-  .dot.queued, .dot.running { background: var(--run); animation: pulse 1.2s infinite ease-in-out; }
-  .dot.done { background: var(--ok); }
-  .dot.error { background: var(--err); }
-  @keyframes pulse { 50% { opacity: .3; } }
-  .subj { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .res { grid-column: 2; font-size: 12px; color: var(--muted); display: -webkit-box;
-    -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .res.error { color: var(--err); }
-  .x { position: absolute; top: 4px; right: 4px; width: 18px; height: 18px; border: 0; border-radius: 4px;
-    background: none; color: var(--muted); font-size: 14px; line-height: 18px; cursor: pointer;
-    opacity: 0; padding: 0; }
-  .job:hover .x { opacity: 1; }
-  .x:hover { background: var(--line); color: var(--fg); }
-  .empty { font-size: 12px; color: var(--muted); padding: 4px; }
-  .ver { margin-top: 14px; font-size: 10px; color: var(--muted); opacity: .6; }
-  .manual { display: none; margin-bottom: 6px; }
-  .manual input { width: 100%; padding: 5px; border: 1px solid var(--line); border-radius: 6px;
-    background: var(--bg); color: var(--fg); font: inherit; font-size: 12px; }
-</style>
 </head>
-<body>
-  <div class="note" id="note"></div>
-  <div class="box" id="setup">
-    Jeton de cet ordi, à coller une fois dans le panneau Missive :
-    <code id="setupToken"></code>
-    <button class="small" id="setupCopy" type="button">Copier</button>
-  </div>
-  <div class="box" id="pair">
-    Première fois sur cet ordi : ouvre <b>http://localhost:4823/</b> dans ton navigateur, copie le jeton et colle-le ici.
-    <input id="pairInput" placeholder="Jeton">
-    <button class="small" id="pairSave" type="button">Enregistrer</button>
-  </div>
-  <div class="manual" id="manual"><input id="manualId" placeholder="Hors Missive : id de conversation (test)"></div>
-
-  <div class="ctx" id="ctx">Ouvre une conversation</div>
-  <textarea id="ins" placeholder="Consigne pour Claude… (Entrée)" disabled></textarea>
-
-  <div class="list" id="jobs"></div>
-  <div class="ver">v0.4</div>
-
+<body style="margin:0;padding:10px;font:12px -apple-system,'Segoe UI',system-ui,sans-serif;color:#6b7280">
+Chargement…
 <script>
-  const LOCAL = 'http://localhost:4823';
-  const INJECTED = '__TOKEN__'; // remplacé par le serveur local quand il sert la page
-  const servedLocally = !INJECTED.startsWith('__');
-  const BASE = servedLocally ? '' : LOCAL;
-  const inMissive = typeof window.Missive !== 'undefined' && window.parent !== window;
-  const $ = (id) => document.getElementById(id);
-  let TOKEN = servedLocally ? INJECTED : '';
-  let current = null;   // { id, subject }
-  let lastJobs = [];
-  let myEmails = new Set();
-  let myNames = new Set();
-  const isMine = (f) => !!f && (myEmails.has(String(f.address || '').toLowerCase()) ||
-    myNames.has(String(f.name || '').trim().toLowerCase()));
-
-  // ---------- Jeton ----------
-  function readToken() {
-    if (servedLocally) return Promise.resolve(INJECTED);
-    if (inMissive) return Missive.storeGet('mc-token').then((t) => t || '');
-    try { return Promise.resolve(localStorage.getItem('mc-token') || ''); } catch { return Promise.resolve(''); }
-  }
-  function saveToken(t) {
-    TOKEN = t;
-    if (inMissive) return Missive.storeSet('mc-token', t);
-    try { localStorage.setItem('mc-token', t); } catch {}
-  }
-  $('pairSave').addEventListener('click', () => {
-    const t = $('pairInput').value.trim();
-    if (!t) return;
-    saveToken(t); $('pairInput').value = ''; load();
-  });
-  if (servedLocally && !inMissive) {
-    $('setup').style.display = 'block';
-    $('setupToken').textContent = INJECTED;
-    $('setupCopy').addEventListener('click', () =>
-      navigator.clipboard.writeText(INJECTED).then(() => { $('setupCopy').textContent = 'Copié ✓'; }));
-  }
-
-  function api(path, opts = {}) {
-    if (!TOKEN) return Promise.reject(Object.assign(new Error('jeton'), { auth: true }));
-    return fetch(BASE + path, { ...opts, headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN } })
-      .then((r) => r.ok ? r.json() : r.json().then((j) => Promise.reject(Object.assign(new Error(j.error || r.status), { auth: r.status === 401 }))));
-  }
-
-  function note(msg) { $('note').style.display = msg ? 'block' : 'none'; $('note').textContent = msg || ''; }
-
-  // ---------- Conversation courante ----------
-  function setConv(c) {
-    current = c;
-    $('ctx').textContent = c ? '↳ ' + (c.subject || '(sans sujet)') : 'Ouvre une conversation';
-    $('ins').disabled = !c;
-    render(lastJobs);
-  }
-
-  if (inMissive) {
-    Missive.on('change:conversations', (ids) => {
-      if (!ids || ids.length !== 1) return setConv(null);
-      Missive.fetchConversations(ids).then(([c]) => {
-        setConv({ id: c.id, subject: c.subject || (c.latest_message && c.latest_message.subject) || '' });
-      });
-    }, { retroactive: true });
-
-    Missive.fetchUsers().then((users) => {
-      const me = (users || []).find((u) => u.me);
-      if (me && me.email) myEmails.add(me.email.toLowerCase());
-      // On envoie souvent depuis une autre adresse que celle du compte Missive :
-      // reconnaître aussi par le nom.
-      if (me) {
-        for (const n of [me.display_name, [me.first_name, me.last_name].filter(Boolean).join(' ')]) {
-          if (n) myNames.add(n.trim().toLowerCase());
+  // Coquille : le vrai panneau est servi par le serveur local missive-claude, sans cache.
+  // Version complète de secours (figée) : full.html
+  fetch('http://localhost:4823/panel.html', { cache: 'no-store' })
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+    .then(function (html) {
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var scripts = Array.prototype.slice.call(doc.querySelectorAll('script'));
+      scripts.forEach(function (s) { s.remove(); });
+      document.head.innerHTML = doc.head.innerHTML;
+      document.body.removeAttribute('style');
+      document.body.innerHTML = doc.body.innerHTML;
+      // Recréer les scripts dans l'ordre (missive.js d'abord, puis le code du panneau).
+      (function next(i) {
+        if (i >= scripts.length) return;
+        var s = document.createElement('script');
+        if (scripts[i].src) {
+          s.src = scripts[i].src;
+          s.onload = s.onerror = function () { next(i + 1); };
+          document.body.appendChild(s);
+        } else {
+          s.textContent = scripts[i].textContent;
+          document.body.appendChild(s);
+          next(i + 1);
         }
-      }
-    }).catch(() => {});
-
-    // Courriel envoyé depuis Missive : retirer les brouillons de cette conversation.
-    Missive.on('message_sent', (data) => {
-      lastDebug = 0; debug('message_sent', { data, current: current && current.id });
-      const cid = (data && (data.conversation_id || (data.conversation && data.conversation.id))) || (current && current.id);
-      if (cid) dismissConversation(cid);
+      })(0);
+    })
+    .catch(function () {
+      document.body.textContent = 'Serveur local injoignable sur cet ordi. Il démarre avec Windows ; sinon, lance scripts/start-hidden.vbs dans le repo missive-claude.';
     });
-  } else {
-    $('manual').style.display = 'block';
-    $('manualId').addEventListener('input', (e) => {
-      const v = e.target.value.trim();
-      setConv(v ? { id: v, subject: '(test hors Missive)' } : null);
-    });
-  }
-
-  // ---------- Lancer ----------
-  $('ins').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); launch(); }
-  });
-
-  function launch() {
-    const instruction = $('ins').value.trim();
-    if (!current || !instruction) return;
-    $('ins').value = '';
-    api('/api/jobs', { method: 'POST', body: JSON.stringify({ conversationId: current.id, subject: current.subject, instruction }) })
-      .then(load)
-      .catch((e) => { $('ins').value = instruction; note('Pas pu lancer : ' + e.message); });
-  }
-
-  // ---------- Retirer ----------
-  function dismiss(id) {
-    lastJobs = lastJobs.filter((j) => j.id !== id); render(lastJobs);
-    api('/api/dismiss', { method: 'POST', body: JSON.stringify({ id }) }).catch(() => {});
-  }
-  function dismissConversation(conversationId) {
-    lastJobs = lastJobs.filter((j) => !(j.conversationId === conversationId && (j.status === 'done' || j.status === 'error')));
-    render(lastJobs);
-    api('/api/dismiss', { method: 'POST', body: JSON.stringify({ conversationId }) }).catch(() => {});
-  }
-
-  // Filet de sécurité : si un courriel a été envoyé d'ailleurs (autre ordi, téléphone),
-  // on repère un message d'Olivier livré après le brouillon.
-  // Diagnostic : envoie au journal du serveur local ce que Missive renvoie (une fois par minute max).
-  let lastDebug = 0;
-  function debug(what, data) {
-    if (Date.now() - lastDebug < 60000) return;
-    lastDebug = Date.now();
-    api('/api/debug', { method: 'POST', body: JSON.stringify({ what, data }) }).catch(() => {});
-  }
-
-  function checkSent() {
-    if (!inMissive) return;
-    if (!myEmails.size && !myNames.size) return;
-    const done = lastJobs.filter((j) => j.status === 'done');
-    const ids = [...new Set(done.map((j) => j.conversationId))];
-    if (!ids.length) return;
-    Missive.fetchConversations(ids).then((convs) => {
-      for (const c of convs || []) {
-        const since = Math.min(...done.filter((j) => j.conversationId === c.id).map((j) => Date.parse(j.finishedAt) / 1000));
-        const sent = (c.messages || [c.latest_message]).some((m) => m && m.delivered_at && m.delivered_at > since &&
-          isMine(m.from_field));
-        if (sent) dismissConversation(c.id);
-      }
-    }).catch(() => {});
-  }
-
-  // ---------- Liste ----------
-  const RUNNING_TEXT = { queued: 'En file…', running: 'Rédaction…' };
-
-  function render(list) {
-    const box = $('jobs');
-    box.innerHTML = '';
-    if (!list.length) { box.innerHTML = '<div class="empty">Aucun brouillon en attente.</div>'; return; }
-    for (const j of list) {
-      const el = document.createElement('div');
-      el.className = 'job' + (current && current.id === j.conversationId ? ' here' : '');
-      el.title = '« ' + j.instruction + ' »' + (j.result ? '\n\n' + j.result : '');
-      el.innerHTML = '<span class="dot"></span><span class="subj"></span><span class="res"></span><button class="x" title="Retirer">×</button>';
-      el.querySelector('.dot').classList.add(j.status);
-      el.querySelector('.subj').textContent = j.subject || j.conversationId;
-      const res = el.querySelector('.res');
-      res.textContent = RUNNING_TEXT[j.status] || j.result || '';
-      if (j.status === 'error') res.classList.add('error');
-      el.addEventListener('click', () => { if (inMissive) Missive.navigate({ conversationId: j.conversationId }); });
-      el.querySelector('.x').addEventListener('click', (e) => { e.stopPropagation(); dismiss(j.id); });
-      box.appendChild(el);
-    }
-  }
-
-  function load() {
-    return api('/api/jobs').then((d) => {
-      $('pair').style.display = 'none';
-      note(d.claude ? '' : 'Claude Code introuvable sur cet ordi.');
-      lastJobs = d.jobs;
-      render(lastJobs);
-    }).catch((e) => {
-      if (e.auth) { note(''); $('pair').style.display = 'block'; }
-      else note('Serveur local injoignable sur cet ordi.');
-    });
-  }
-
-  readToken().then((t) => {
-    if (!TOKEN) TOKEN = t;
-    load();
-    setInterval(load, 3000);
-    setInterval(checkSent, 20000);
-  });
 </script>
 </body>
 </html>
