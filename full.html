@@ -8,11 +8,11 @@
 <style>
   :root {
     --bg: #ffffff; --fg: #1f2328; --muted: #6b7280; --line: #e5e7eb; --hover: #f3f4f6;
-    --accent: #d97757; --ok: #1a7f37; --err: #cf222e; --run: #bf8700;
+    --accent: #d97757; --ok: #1a7f37; --err: #cf222e; --run: #bf8700; --warn: #e8590c;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #1e1f22; --fg: #e6e6e6; --muted: #8b9096; --line: #34363b; --hover: #2a2c30;
-      --ok: #3fb950; --err: #f85149; --run: #d29922; }
+      --ok: #3fb950; --err: #f85149; --run: #d29922; --warn: #ff8a3d; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; padding: 10px; background: var(--bg); color: var(--fg);
@@ -61,6 +61,16 @@
   .hidden-list .job { opacity: .55; padding-right: 4px; }
   .hidden-list .job:hover { opacity: .9; }
   .dot.sent { background: var(--muted); }
+  .dot.warn { background: var(--warn); }
+  .job.open { background: var(--hover); }
+  .detail { grid-column: 1 / -1; margin: 6px 0 2px; padding-top: 6px; border-top: 1px solid var(--line);
+    cursor: default; }
+  .msg { margin-bottom: 8px; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; }
+  .msg .who { display: block; font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--muted); margin-bottom: 1px; }
+  .msg.claude .who { color: var(--accent); }
+  .detail textarea { min-height: 40px; font-size: 12px; }
+  .working { font-size: 12px; color: var(--run); }
   .manual { display: none; margin-bottom: 6px; }
   .manual input { width: 100%; padding: 5px; border: 1px solid var(--line); border-radius: 6px;
     background: var(--bg); color: var(--fg); font: inherit; font-size: 12px; }
@@ -90,7 +100,7 @@
   <div class="list" id="jobs"></div>
   <button class="toggle" id="toggleHidden" type="button" style="display:none"></button>
   <div class="list hidden-list" id="hiddenJobs" style="display:none"></div>
-  <div class="ver">v0.7</div>
+  <div class="ver">v0.8</div>
 
 <script>
   const LOCAL = 'http://localhost:4823';
@@ -200,7 +210,7 @@
     if (!current || !instruction) return;
     $('ins').value = '';
     api('/api/jobs', { method: 'POST', body: JSON.stringify({ conversationId: current.id, subject: current.subject, instruction }) })
-      .then(load)
+      .then(() => { note(''); load(true); })
       .catch((e) => { $('ins').value = instruction; note('Pas pu lancer : ' + e.message); });
   }
 
@@ -284,24 +294,87 @@
     render(lastJobs);
   });
 
+  let openId = null;        // brouillon dont le fil est ouvert
+  let followDraft = {};     // texte de relance en cours de frappe, par brouillon
+
+  function dotClass(j, hidden) {
+    if (hidden && j.dismissReason === 'sent') return 'sent';
+    if (j.status === 'done' && j.warn) return 'warn';
+    return j.status;
+  }
+
   function row(j, hidden) {
     const el = document.createElement('div');
-    el.className = 'job' + (current && current.id === j.conversationId ? ' here' : '');
-    el.title = '« ' + j.instruction + ' »' + (j.result ? '\n\n' + j.result : '');
+    const isOpen = openId === j.id;
+    el.className = 'job' + (current && current.id === j.conversationId ? ' here' : '') + (isOpen ? ' open' : '');
     el.innerHTML = '<span class="dot"></span><span class="subj"></span><span class="res"></span>' +
       (hidden ? '' : '<button class="x" title="Masquer">×</button>');
-    el.querySelector('.dot').classList.add(hidden && j.dismissReason === 'sent' ? 'sent' : j.status);
+    el.querySelector('.dot').classList.add(dotClass(j, hidden));
     el.querySelector('.subj').textContent = j.subject || j.conversationId;
     const res = el.querySelector('.res');
     const prefix = hidden ? (j.dismissReason === 'sent' ? 'Envoyé · ' : 'Masqué · ') : '';
     res.textContent = prefix + (RUNNING_TEXT[j.status] || j.result || '');
     if (j.status === 'error' && !hidden) res.classList.add('error');
-    el.addEventListener('click', () => { if (inMissive) Missive.navigate({ conversationId: j.conversationId }); });
+
+    // Clic : va au courriel ET ouvre/ferme le fil avec Claude.
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.detail')) return;
+      if (inMissive) Missive.navigate({ conversationId: j.conversationId });
+      openId = isOpen ? null : j.id;
+      render(lastJobs, true);
+    });
     if (!hidden) el.querySelector('.x').addEventListener('click', (e) => { e.stopPropagation(); dismiss(j.id); });
+    if (isOpen) el.appendChild(detail(j));
     return el;
   }
 
-  function render(list) {
+  function detail(j) {
+    const d = document.createElement('div');
+    d.className = 'detail';
+    for (const m of j.thread || []) {
+      const msg = document.createElement('div');
+      msg.className = 'msg ' + m.who;
+      msg.innerHTML = '<span class="who"></span>';
+      msg.querySelector('.who').textContent = m.who === 'claude' ? 'Claude' : 'Toi';
+      msg.appendChild(document.createTextNode(m.text || ''));
+      d.appendChild(msg);
+    }
+    if (j.status === 'queued' || j.status === 'running') {
+      const w = document.createElement('div');
+      w.className = 'working';
+      w.textContent = 'Claude travaille…';
+      d.appendChild(w);
+    } else if (j.canFollowUp) {
+      const ta = document.createElement('textarea');
+      ta.placeholder = 'Ajuster ce brouillon… (Entrée)';
+      ta.value = followDraft[j.id] || '';
+      ta.dataset.job = j.id;
+      ta.addEventListener('input', () => { followDraft[j.id] = ta.value; });
+      ta.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); followUp(j, ta.value); }
+      });
+      d.appendChild(ta);
+    }
+    return d;
+  }
+
+  function followUp(j, text) {
+    text = (text || '').trim();
+    if (!text) return;
+    followDraft[j.id] = '';
+    api('/api/followup', { method: 'POST', body: JSON.stringify({ id: j.id, instruction: text }) })
+      .then(() => { note(''); load(true); })
+      .catch((e) => { followDraft[j.id] = text; note('Pas pu relancer : ' + e.message); render(lastJobs, true); });
+  }
+
+  // Ne redessiner que si quelque chose a changé (sinon la liste scintille toutes les 3 s).
+  let lastSig = '';
+  function render(list, force) {
+    const sig = JSON.stringify([list, current && current.id, showHidden, openId]);
+    if (!force && sig === lastSig) return;
+    lastSig = sig;
+    // Garder le focus dans une zone de relance pendant qu'on tape.
+    const focused = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.job;
     const active = list.filter((j) => !j.dismissed);
     const hidden = list.filter((j) => j.dismissed);
     const box = $('jobs');
@@ -316,15 +389,23 @@
     hb.style.display = showHidden && hidden.length ? 'block' : 'none';
     hb.innerHTML = '';
     if (showHidden) for (const j of hidden) hb.appendChild(row(j, true));
+
+    if (focused) {
+      const ta = document.querySelector('textarea[data-job="' + focused + '"]');
+      if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+    } else if (openId && force) {
+      const ta = document.querySelector('textarea[data-job="' + openId + '"]');
+      if (ta) ta.focus();
+    }
   }
 
-  function load() {
+  function load(force) {
     return api('/api/jobs').then((d) => {
       setOnline(true);
       $('pair').style.display = 'none';
-      note(d.claude ? '' : 'Claude Code introuvable sur cet ordi.');
+      if (!$('note').textContent.startsWith('Pas pu')) note(d.claude ? '' : 'Claude Code introuvable sur cet ordi.');
       lastJobs = d.jobs;
-      render(lastJobs);
+      render(lastJobs, force === true);
     }).catch((e) => {
       if (e.auth) { setOnline(true); note(''); $('pair').style.display = 'block'; }
       else setOnline(false);
