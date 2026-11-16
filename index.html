@@ -50,6 +50,7 @@
   .job:hover .x { opacity: 1; }
   .x:hover { background: var(--line); color: var(--fg); }
   .empty { font-size: 12px; color: var(--muted); padding: 4px; }
+  .ver { margin-top: 14px; font-size: 10px; color: var(--muted); opacity: .6; }
   .manual { display: none; margin-bottom: 6px; }
   .manual input { width: 100%; padding: 5px; border: 1px solid var(--line); border-radius: 6px;
     background: var(--bg); color: var(--fg); font: inherit; font-size: 12px; }
@@ -73,6 +74,7 @@
   <textarea id="ins" placeholder="Consigne pour Claude… (Entrée)" disabled></textarea>
 
   <div class="list" id="jobs"></div>
+  <div class="ver">v0.3</div>
 
 <script>
   const LOCAL = 'http://localhost:4823';
@@ -140,6 +142,7 @@
 
     // Courriel envoyé depuis Missive : retirer les brouillons de cette conversation.
     Missive.on('message_sent', (data) => {
+      lastDebug = 0; debug('message_sent', { data, current: current && current.id });
       const cid = (data && (data.conversation_id || (data.conversation && data.conversation.id))) || (current && current.id);
       if (cid) dismissConversation(cid);
     });
@@ -178,12 +181,28 @@
 
   // Filet de sécurité : si un courriel a été envoyé d'ailleurs (autre ordi, téléphone),
   // on repère un message d'Olivier livré après le brouillon.
+  // Diagnostic : envoie au journal du serveur local ce que Missive renvoie (une fois par minute max).
+  let lastDebug = 0;
+  function debug(what, data) {
+    if (Date.now() - lastDebug < 60000) return;
+    lastDebug = Date.now();
+    api('/api/debug', { method: 'POST', body: JSON.stringify({ what, data }) }).catch(() => {});
+  }
+
   function checkSent() {
-    if (!inMissive || !myEmails.size) return;
+    if (!inMissive) return;
+    if (!myEmails.size) { debug('checkSent', { me: 'vide' }); return; }
     const done = lastJobs.filter((j) => j.status === 'done');
     const ids = [...new Set(done.map((j) => j.conversationId))];
     if (!ids.length) return;
     Missive.fetchConversations(ids).then((convs) => {
+      debug('checkSent', {
+        me: [...myEmails],
+        convs: (convs || []).map((c) => ({
+          id: c.id, n: (c.messages || []).length,
+          last: (c.messages || [c.latest_message]).slice(-2).map((m) => m && { d: m.delivered_at, f: m.from_field }),
+        })),
+      });
       for (const c of convs || []) {
         const since = Math.min(...done.filter((j) => j.conversationId === c.id).map((j) => Date.parse(j.finishedAt) / 1000));
         const sent = (c.messages || [c.latest_message]).some((m) => m && m.delivered_at && m.delivered_at > since &&
