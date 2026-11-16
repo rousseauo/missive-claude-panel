@@ -51,12 +51,26 @@
   .x:hover { background: var(--line); color: var(--fg); }
   .empty { font-size: 12px; color: var(--muted); padding: 4px; }
   .ver { margin-top: 14px; font-size: 10px; color: var(--muted); opacity: .6; }
+  .offline { display: none; margin-bottom: 8px; padding: 7px 8px; border-radius: 6px; font-size: 12px;
+    background: color-mix(in srgb, var(--err) 12%, transparent); color: var(--err); }
+  .offline b { display: block; margin-bottom: 2px; }
+  .offline code { font-size: 11px; }
+  .toggle { margin-top: 10px; padding: 4px; border: 0; background: none; color: var(--muted);
+    font: inherit; font-size: 11px; cursor: pointer; }
+  .toggle:hover { color: var(--fg); }
+  .hidden-list .job { opacity: .55; padding-right: 4px; }
+  .hidden-list .job:hover { opacity: .9; }
+  .dot.sent { background: var(--muted); }
   .manual { display: none; margin-bottom: 6px; }
   .manual input { width: 100%; padding: 5px; border: 1px solid var(--line); border-radius: 6px;
     background: var(--bg); color: var(--fg); font: inherit; font-size: 12px; }
 </style>
 </head>
 <body>
+  <div class="offline" id="offline">
+    <b>● Serveur local arrêté</b>
+    Tes consignes ne partiront pas. Il démarre avec Windows ; sinon, lance <code>scripts\start-hidden.vbs</code> dans missive-claude. Le panneau se reconnecte tout seul.
+  </div>
   <div class="note" id="note"></div>
   <div class="box" id="setup">
     Jeton de cet ordi, à coller une fois dans le panneau Missive :
@@ -74,7 +88,9 @@
   <textarea id="ins" placeholder="Consigne pour Claude… (Entrée)" disabled></textarea>
 
   <div class="list" id="jobs"></div>
-  <div class="ver">v0.5</div>
+  <button class="toggle" id="toggleHidden" type="button" style="display:none"></button>
+  <div class="list hidden-list" id="hiddenJobs" style="display:none"></div>
+  <div class="ver">v0.7</div>
 
 <script>
   const LOCAL = 'http://localhost:4823';
@@ -126,8 +142,16 @@
   function setConv(c) {
     current = c;
     $('ctx').textContent = c ? '↳ ' + (c.subject || '(sans sujet)') : 'Ouvre une conversation';
-    $('ins').disabled = !c;
+    $('ins').disabled = !c || !online;
     render(lastJobs);
+  }
+
+  // ---------- Serveur local joignable ? ----------
+  let online = true;
+  function setOnline(v) {
+    online = v;
+    $('offline').style.display = v ? 'none' : 'block';
+    $('ins').disabled = !current || !v;
   }
 
   if (inMissive) {
@@ -150,11 +174,13 @@
       }
     }).catch(() => {});
 
-    // Courriel envoyé depuis Missive : retirer les brouillons de cette conversation.
+    // Courriel envoyé depuis Missive : l'événement donne l'id du MESSAGE envoyé.
+    // On cherche dans quelles conversations de brouillons il apparaît (avec quelques essais,
+    // le temps que Missive l'ajoute à la conversation).
     Missive.on('message_sent', (data) => {
-      lastDebug = 0; debug('message_sent', { data, current: current && current.id });
-      const cid = (data && (data.conversation_id || (data.conversation && data.conversation.id))) || (current && current.id);
-      if (cid) dismissConversation(cid);
+      const msgId = typeof data === 'string' ? data : (data && (data.id || data.message_id));
+      if (!msgId) return;
+      [2000, 8000, 20000].forEach((t) => setTimeout(() => findSent(msgId), t));
     });
   } else {
     $('manual').style.display = 'block';
@@ -179,14 +205,20 @@
   }
 
   // ---------- Retirer ----------
+  // Rien n'est supprimé : les items sont seulement masqués (raison « sent » ou « manual »).
   function dismiss(id) {
-    lastJobs = lastJobs.filter((j) => j.id !== id); render(lastJobs);
-    api('/api/dismiss', { method: 'POST', body: JSON.stringify({ id }) }).catch(() => {});
+    for (const j of lastJobs) if (j.id === id) { j.dismissed = true; j.dismissReason = 'manual'; }
+    render(lastJobs);
+    api('/api/dismiss', { method: 'POST', body: JSON.stringify({ id, reason: 'manual' }) }).catch(() => {});
   }
   function dismissConversation(conversationId) {
-    lastJobs = lastJobs.filter((j) => !(j.conversationId === conversationId && (j.status === 'done' || j.status === 'error')));
+    for (const j of lastJobs) {
+      if (!j.dismissed && j.conversationId === conversationId && (j.status === 'done' || j.status === 'error')) {
+        j.dismissed = true; j.dismissReason = 'sent';
+      }
+    }
     render(lastJobs);
-    api('/api/dismiss', { method: 'POST', body: JSON.stringify({ conversationId }) }).catch(() => {});
+    api('/api/dismiss', { method: 'POST', body: JSON.stringify({ conversationId, reason: 'sent' }) }).catch(() => {});
   }
 
   // Filet de sécurité : si un courriel a été envoyé d'ailleurs (autre ordi, téléphone),
@@ -199,54 +231,103 @@
     api('/api/debug', { method: 'POST', body: JSON.stringify({ what, data }) }).catch(() => {});
   }
 
-  function checkSent() {
-    if (!inMissive) return;
-    if (!myEmails.size && !myNames.size) return;
-    const done = lastJobs.filter((j) => j.status === 'done');
-    const ids = [...new Set(done.map((j) => j.conversationId))];
+  function doneConvIds() {
+    return [...new Set(lastJobs.filter((j) => !j.dismissed && (j.status === 'done' || j.status === 'error')).map((j) => j.conversationId))];
+  }
+
+  function findSent(msgId) {
+    const ids = doneConvIds();
     if (!ids.length) return;
     Missive.fetchConversations(ids).then((convs) => {
       for (const c of convs || []) {
+        const msgs = (c.messages || []).concat(c.latest_message ? [c.latest_message] : []);
+        if (msgs.some((m) => m && m.id === msgId)) dismissConversation(c.id);
+      }
+    }).catch(() => {});
+  }
+
+  function checkSent() {
+    if (!inMissive) return;
+    const done = lastJobs.filter((j) => !j.dismissed && j.status === 'done');
+    const ids = [...new Set(done.map((j) => j.conversationId))];
+    if (!ids.length) return;
+    Missive.fetchConversations(ids).then((convs) => {
+      const report = [];
+      for (const c of convs || []) {
         const since = Math.min(...done.filter((j) => j.conversationId === c.id).map((j) => Date.parse(j.finishedAt) / 1000));
-        const sent = (c.messages || [c.latest_message]).some((m) => m && m.delivered_at && m.delivered_at > since &&
-          isMine(m.from_field));
+        const msgs = (c.messages || []).concat(c.latest_message ? [c.latest_message] : []);
+        const sent = msgs.some((m) => m && m.delivered_at && m.delivered_at > since && isMine(m.from_field));
+        report.push({ id: c.id.slice(0, 8), n: msgs.length, sent });
         if (sent) dismissConversation(c.id);
       }
+      debug('checkSent', { names: [...myNames], emails: [...myEmails], asked: ids.length, got: (convs || []).length, report });
+    }).catch((e) => debug('checkSent-err', String(e && e.message || e)));
+  }
+
+  // Rechargement automatique quand le panneau est mis à jour sur ce PC.
+  let panelVersion = null;
+  function checkVersion() {
+    api('/api/version').then((d) => {
+      if (panelVersion && d.version !== panelVersion) location.reload();
+      panelVersion = d.version;
     }).catch(() => {});
   }
 
   // ---------- Liste ----------
   const RUNNING_TEXT = { queued: 'En file…', running: 'Rédaction…' };
 
+  let showHidden = false;
+  try { showHidden = localStorage.getItem('mc-show-hidden') === '1'; } catch {}
+  $('toggleHidden').addEventListener('click', () => {
+    showHidden = !showHidden;
+    try { localStorage.setItem('mc-show-hidden', showHidden ? '1' : '0'); } catch {}
+    render(lastJobs);
+  });
+
+  function row(j, hidden) {
+    const el = document.createElement('div');
+    el.className = 'job' + (current && current.id === j.conversationId ? ' here' : '');
+    el.title = '« ' + j.instruction + ' »' + (j.result ? '\n\n' + j.result : '');
+    el.innerHTML = '<span class="dot"></span><span class="subj"></span><span class="res"></span>' +
+      (hidden ? '' : '<button class="x" title="Masquer">×</button>');
+    el.querySelector('.dot').classList.add(hidden && j.dismissReason === 'sent' ? 'sent' : j.status);
+    el.querySelector('.subj').textContent = j.subject || j.conversationId;
+    const res = el.querySelector('.res');
+    const prefix = hidden ? (j.dismissReason === 'sent' ? 'Envoyé · ' : 'Masqué · ') : '';
+    res.textContent = prefix + (RUNNING_TEXT[j.status] || j.result || '');
+    if (j.status === 'error' && !hidden) res.classList.add('error');
+    el.addEventListener('click', () => { if (inMissive) Missive.navigate({ conversationId: j.conversationId }); });
+    if (!hidden) el.querySelector('.x').addEventListener('click', (e) => { e.stopPropagation(); dismiss(j.id); });
+    return el;
+  }
+
   function render(list) {
+    const active = list.filter((j) => !j.dismissed);
+    const hidden = list.filter((j) => j.dismissed);
     const box = $('jobs');
     box.innerHTML = '';
-    if (!list.length) { box.innerHTML = '<div class="empty">Aucun brouillon en attente.</div>'; return; }
-    for (const j of list) {
-      const el = document.createElement('div');
-      el.className = 'job' + (current && current.id === j.conversationId ? ' here' : '');
-      el.title = '« ' + j.instruction + ' »' + (j.result ? '\n\n' + j.result : '');
-      el.innerHTML = '<span class="dot"></span><span class="subj"></span><span class="res"></span><button class="x" title="Retirer">×</button>';
-      el.querySelector('.dot').classList.add(j.status);
-      el.querySelector('.subj').textContent = j.subject || j.conversationId;
-      const res = el.querySelector('.res');
-      res.textContent = RUNNING_TEXT[j.status] || j.result || '';
-      if (j.status === 'error') res.classList.add('error');
-      el.addEventListener('click', () => { if (inMissive) Missive.navigate({ conversationId: j.conversationId }); });
-      el.querySelector('.x').addEventListener('click', (e) => { e.stopPropagation(); dismiss(j.id); });
-      box.appendChild(el);
-    }
+    if (!active.length) box.innerHTML = '<div class="empty">Aucun brouillon en attente.</div>';
+    for (const j of active) box.appendChild(row(j, false));
+
+    const t = $('toggleHidden');
+    t.style.display = hidden.length ? 'block' : 'none';
+    t.textContent = (showHidden ? '▾ ' : '▸ ') + 'Envoyés et masqués (' + hidden.length + ')';
+    const hb = $('hiddenJobs');
+    hb.style.display = showHidden && hidden.length ? 'block' : 'none';
+    hb.innerHTML = '';
+    if (showHidden) for (const j of hidden) hb.appendChild(row(j, true));
   }
 
   function load() {
     return api('/api/jobs').then((d) => {
+      setOnline(true);
       $('pair').style.display = 'none';
       note(d.claude ? '' : 'Claude Code introuvable sur cet ordi.');
       lastJobs = d.jobs;
       render(lastJobs);
     }).catch((e) => {
-      if (e.auth) { note(''); $('pair').style.display = 'block'; }
-      else note('Serveur local injoignable sur cet ordi.');
+      if (e.auth) { setOnline(true); note(''); $('pair').style.display = 'block'; }
+      else setOnline(false);
     });
   }
 
@@ -255,6 +336,9 @@
     load();
     setInterval(load, 3000);
     setInterval(checkSent, 20000);
+    setTimeout(checkSent, 3000);
+    checkVersion();
+    setInterval(checkVersion, 30000);
   });
 </script>
 </body>

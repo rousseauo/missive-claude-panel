@@ -10,33 +10,45 @@ Chargement…
 <script>
   // Coquille : le vrai panneau est servi par le serveur local missive-claude, sans cache.
   // Version complète de secours (figée) : full.html
-  fetch('http://localhost:4823/panel.html', { cache: 'no-store' })
-    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
-    .then(function (html) {
-      var doc = new DOMParser().parseFromString(html, 'text/html');
-      var scripts = Array.prototype.slice.call(doc.querySelectorAll('script'));
-      scripts.forEach(function (s) { s.remove(); });
-      document.head.innerHTML = doc.head.innerHTML;
-      document.body.removeAttribute('style');
-      document.body.innerHTML = doc.body.innerHTML;
-      // Recréer les scripts dans l'ordre (missive.js d'abord, puis le code du panneau).
-      (function next(i) {
-        if (i >= scripts.length) return;
-        var s = document.createElement('script');
-        if (scripts[i].src) {
-          s.src = scripts[i].src;
-          s.onload = s.onerror = function () { next(i + 1); };
-          document.body.appendChild(s);
-        } else {
-          s.textContent = scripts[i].textContent;
-          document.body.appendChild(s);
-          next(i + 1);
-        }
-      })(0);
-    })
-    .catch(function () {
-      document.body.textContent = 'Serveur local injoignable sur cet ordi. Il démarre avec Windows ; sinon, lance scripts/start-hidden.vbs dans le repo missive-claude.';
-    });
+  var tries = 0;
+  function boot() {
+    fetch('http://localhost:4823/panel.html', { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+      .then(inject)
+      .catch(function () {
+        tries++;
+        document.body.innerHTML =
+          '<div style="padding:7px 8px;border-radius:6px;background:rgba(207,34,46,.1);color:#cf222e">' +
+          '<b style="display:block;margin-bottom:2px">● Serveur local arrêté</b>' +
+          'Le panneau Claude ne peut pas démarrer. Le serveur démarre avec Windows ; sinon, lance ' +
+          '<code>scripts\\start-hidden.vbs</code> dans missive-claude. Nouvel essai automatique toutes les 5 s' +
+          (tries > 1 ? ' (essai ' + tries + ')' : '') + '.</div>';
+        setTimeout(boot, 5000);
+      });
+  }
+  function inject(html) {
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    var scripts = Array.prototype.slice.call(doc.querySelectorAll('script'));
+    scripts.forEach(function (s) { s.remove(); });
+    document.head.innerHTML = doc.head.innerHTML;
+    document.body.removeAttribute('style');
+    document.body.innerHTML = doc.body.innerHTML;
+    // Recréer les scripts dans l'ordre (missive.js d'abord, puis le code du panneau).
+    (function next(i) {
+      if (i >= scripts.length) return;
+      var s = document.createElement('script');
+      if (scripts[i].src) {
+        s.src = scripts[i].src;
+        s.onload = s.onerror = function () { next(i + 1); };
+        document.body.appendChild(s);
+      } else {
+        s.textContent = scripts[i].textContent;
+        document.body.appendChild(s);
+        next(i + 1);
+      }
+    })(0);
+  }
+  boot();
 </script>
 </body>
 </html>
