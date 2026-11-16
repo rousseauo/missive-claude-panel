@@ -74,7 +74,7 @@
   <textarea id="ins" placeholder="Consigne pour Claude… (Entrée)" disabled></textarea>
 
   <div class="list" id="jobs"></div>
-  <div class="ver">v0.3</div>
+  <div class="ver">v0.4</div>
 
 <script>
   const LOCAL = 'http://localhost:4823';
@@ -87,6 +87,9 @@
   let current = null;   // { id, subject }
   let lastJobs = [];
   let myEmails = new Set();
+  let myNames = new Set();
+  const isMine = (f) => !!f && (myEmails.has(String(f.address || '').toLowerCase()) ||
+    myNames.has(String(f.name || '').trim().toLowerCase()));
 
   // ---------- Jeton ----------
   function readToken() {
@@ -138,6 +141,13 @@
     Missive.fetchUsers().then((users) => {
       const me = (users || []).find((u) => u.me);
       if (me && me.email) myEmails.add(me.email.toLowerCase());
+      // On envoie souvent depuis une autre adresse que celle du compte Missive :
+      // reconnaître aussi par le nom.
+      if (me) {
+        for (const n of [me.display_name, [me.first_name, me.last_name].filter(Boolean).join(' ')]) {
+          if (n) myNames.add(n.trim().toLowerCase());
+        }
+      }
     }).catch(() => {});
 
     // Courriel envoyé depuis Missive : retirer les brouillons de cette conversation.
@@ -191,22 +201,15 @@
 
   function checkSent() {
     if (!inMissive) return;
-    if (!myEmails.size) { debug('checkSent', { me: 'vide' }); return; }
+    if (!myEmails.size && !myNames.size) return;
     const done = lastJobs.filter((j) => j.status === 'done');
     const ids = [...new Set(done.map((j) => j.conversationId))];
     if (!ids.length) return;
     Missive.fetchConversations(ids).then((convs) => {
-      debug('checkSent', {
-        me: [...myEmails],
-        convs: (convs || []).map((c) => ({
-          id: c.id, n: (c.messages || []).length,
-          last: (c.messages || [c.latest_message]).slice(-2).map((m) => m && { d: m.delivered_at, f: m.from_field }),
-        })),
-      });
       for (const c of convs || []) {
         const since = Math.min(...done.filter((j) => j.conversationId === c.id).map((j) => Date.parse(j.finishedAt) / 1000));
         const sent = (c.messages || [c.latest_message]).some((m) => m && m.delivered_at && m.delivered_at > since &&
-          m.from_field && myEmails.has(String(m.from_field.address || '').toLowerCase()));
+          isMine(m.from_field));
         if (sent) dismissConversation(c.id);
       }
     }).catch(() => {});
